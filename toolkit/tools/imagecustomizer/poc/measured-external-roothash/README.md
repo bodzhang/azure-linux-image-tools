@@ -89,6 +89,71 @@ The Type #1 entry is unsigned. The PoC does not treat it as locally trusted.
 Any modification changes the PCR 12 measurement and is rejected by the remote
 attestation policy.
 
+## Secure Boot with an external roothash
+
+Secure Boot and measured boot provide different properties in this design.
+
+Secure Boot authenticates executable code:
+
+- firmware verifies the systemd-boot PE signature;
+- systemd-boot loads the UKI through UEFI image-loading services;
+- firmware verifies the UKI PE signature;
+- the UKI signature covers systemd-stub, the kernel, the initrd, and the other
+  embedded UKI sections.
+
+Secure Boot does not authenticate a Type #1 BLS text file or its `options`
+line. The BLS options become the loaded UKI's EFI LoadOptions and therefore
+remain external to the signed UKI.
+
+The UKI used by this PoC has no embedded `.cmdline` section. On a standard VM,
+systemd-stub consequently accepts the external LoadOptions, converts them into
+the Linux command line, measures them into PCR 12, and passes them to the
+kernel. Linux exposes the value through `/proc/cmdline`.
+
+The kernel transports `roothash=` but does not create the dm-verity mapping.
+The Azure Linux Dracut initrd contains `systemd-veritysetup-generator` and
+`systemd-veritysetup`. Early userspace reads:
+
+- `roothash=<expected-root-digest>`;
+- `systemd.verity_root_data=PARTUUID=<data-partition>`;
+- `systemd.verity_root_hash=PARTUUID=<hash-partition>`;
+- `systemd.verity_root_options=<corruption-policy>`.
+
+It creates `/dev/mapper/root`, verifies every root filesystem block against
+the supplied Merkle-tree root hash, and mounts that mapping as `/sysroot`.
+
+The complete trust chain is:
+
+```text
+Secure Boot
+  authenticates systemd-boot and the UKI
+        |
+        v
+external BLS options
+  supply root=, partition IDs, and roothash=
+        |
+        v
+systemd-stub
+  measures the accepted command line into PCR 12
+        |
+        v
+systemd-veritysetup
+  enforces that roothash while reading the root filesystem
+        |
+        v
+remote verifier
+  authorizes the measured command line and expected roothash
+```
+
+This allows the root filesystem and its root hash to change without rebuilding
+or re-signing the UKI. The verifier policy changes when a new root filesystem
+is approved. The signed kernel and initrd remain unchanged.
+
+Measurement does not make the external BLS entry trusted. A host can modify the
+entry and cause the VM to boot with another command line. The security property
+is that the modification is reflected in PCR 12, allowing the verifier to deny
+identity, secrets, or service authorization.
+
 ## Upstream systemd-stub blocker
 
 Upstream systemd-stub currently contains this confidential-VM restriction:
@@ -101,6 +166,31 @@ if (secure_boot_enabled() && (have_cmdline || is_confidential_vm()))
 With Secure Boot enabled, `is_confidential_vm()` causes systemd-stub to ignore
 all external EFI LoadOptions. Removing `.cmdline` from the UKI is therefore
 sufficient for a standard VM but not for SEV, SEV-SNP, or TDX.
+
+The upstream rationale follows the confidential-computing threat model
+described in
+[systemd/systemd#27604](https://github.com/systemd/systemd/issues/27604):
+
+- the confidential VM does not trust the host or hypervisor;
+- the host can influence virtual firmware inputs and unencrypted ESP content;
+- BLS options and EFI LoadOptions are not covered by the UKI's Secure Boot
+  signature;
+- the guest can act on a command line before any remote verifier makes an
+  authorization decision;
+- measuring an input records its use but does not prevent the guest from using
+  it.
+
+For those reasons, upstream systemd-stub uses a verified-boot default: on a
+confidential VM with Secure Boot, command-line content must come from the signed
+UKI or a Secure Boot-verified UKI addon. Commit
+[`fab0eeb72bb5`](https://github.com/systemd/systemd/commit/fab0eeb72bb5e1fdf3304cc6e01ebf5d7677c124)
+added the unconditional confidential-VM rejection to `use_load_options()`.
+
+That upstream policy protects deployments that do not have an exact PCR 12
+authorization service or that consume local secrets before remote attestation.
+This PoC uses a narrower deployment contract: no protected identity, secret,
+or service authorization is released until a remote verifier validates the
+quote, event log, full command line, and expected dm-verity root hash.
 
 This restriction is the only systemd behavior that the confidential-VM version
 of this PoC needs to change. The Image Customizer integration, dm-verity image
