@@ -1,0 +1,87 @@
+previewFeatures:
+- uki
+
+storage:
+  bootType: efi
+  disks:
+  - partitionTableType: gpt
+    partitions:
+    - id: esp
+      type: esp
+      size: 256M
+
+    - id: boot
+      size: 1G
+
+    - id: root
+      size: 8G
+
+    - id: roothash
+      size: 256M
+
+    - id: var
+      size: 4G
+
+  verity:
+  - id: verityroot
+    name: root
+    dataDeviceId: root
+    hashDeviceId: roothash
+    dataDeviceMountIdType: part-uuid
+    hashDeviceMountIdType: part-uuid
+    corruptionOption: panic
+
+  filesystems:
+  - deviceId: esp
+    type: fat32
+    mountPoint:
+      path: /boot/efi
+      options: umask=0077
+
+  - deviceId: boot
+    type: ext4
+    mountPoint: /boot
+
+  - deviceId: verityroot
+    type: ext4
+    mountPoint:
+      path: /
+      options: ro
+
+  - deviceId: var
+    type: ext4
+    mountPoint: /var
+
+os:
+  bootloader:
+    resetType: hard-reset
+
+  kernelCommandLine:
+    extraCommandLine:
+    - rd.info
+
+  uki:
+    mode: create
+
+  packages:
+    remove:
+    - grub2-efi-binary
+
+    install:
+    - device-mapper
+    - systemd-boot
+    - veritysetup
+
+scripts:
+  postCustomization:
+  - content: |
+      set -eux
+
+      # Keep SSH configuration writable while root remains verity-protected.
+      mkdir -p /var/etc/ssh
+      if [ -d /etc/ssh ] && [ ! -L /etc/ssh ]; then
+          cp -a /etc/ssh/. /var/etc/ssh/
+          rm -rf /etc/ssh
+      fi
+      rm -f /var/etc/ssh/ssh_host_*_key /var/etc/ssh/ssh_host_*_key.pub
+      ln -sfn ../var/etc/ssh /etc/ssh
